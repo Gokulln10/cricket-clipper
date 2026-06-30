@@ -15,6 +15,9 @@ class Settings:
     local_baseline_seconds: float = 45.0  # rolling baseline window (0 = global)
     use_onset: bool = True         # also detect sudden loudness rises
     onset_sensitivity: float = 2.5 # z-score threshold for onset (rise) detection
+    use_swell: bool = True         # detect gradual cheer build-ups (boundaries)
+    swell_window_seconds: float = 3.0  # averaging window for a sustained swell
+    swell_sensitivity: float = 1.0     # z-score threshold for swell detection
 
     # --- Clip framing ---
     pre_seconds: float = 6.0       # lead-in before the crowd reaction
@@ -37,6 +40,18 @@ class Settings:
     # --- Motion / event scoring (visual excitement proxy) ---
     use_event_score: bool = True
     motion_sample_fps: float = 4.0 # frames/sec sampled when scoring motion
+
+    # --- Player / ball detection (optional, requires ultralytics) ---
+    use_player_detect: bool = False
+    player_model: str = "yolov8n.pt"   # YOLO weights (auto-downloaded on first use)
+    player_sample_fps: float = 2.0     # frames/sec sampled for detection
+    player_conf: float = 0.35          # detection confidence threshold
+    device: str = ""                   # "", "cpu", "cuda", or "mps" (auto if empty)
+
+    # --- Audio-event classifier (optional, trained under training/) ---
+    classifier_model: str = ""         # path to a trained checkpoint, "" = disabled
+    classifier_min_prob: float = 0.5   # ignore predictions below this confidence
+    classifier_boost: float = 1.0      # how strongly a positive event lifts the score
 
     # --- Parallelism ---
     workers: int = 0               # 0 = auto (os.cpu_count()); used for motion + export

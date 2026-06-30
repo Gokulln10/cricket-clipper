@@ -9,7 +9,7 @@ import argparse
 import sys
 
 from clipper.config import Settings
-from clipper.pipeline import build_highlights, export_clips, Stats
+from clipper.pipeline import build_highlights, export_clips, Stats, detect_cpu_count
 
 
 def parse_args(argv=None) -> argparse.Namespace:
@@ -31,6 +31,18 @@ def parse_args(argv=None) -> argparse.Namespace:
                    help="Parallel workers for motion scoring & export (0 = all CPU cores).")
     p.add_argument("--scene-frame-skip", type=int, default=0,
                    help="Skip N frames between scene-detection samples (faster, less precise).")
+    p.add_argument("--players", action="store_true",
+                   help="Enable YOLO player/ball detection (needs `pip install -r requirements-ml.txt`).")
+    p.add_argument("--player-model", default="yolov8n.pt",
+                   help="YOLO weights to use (auto-downloaded on first run).")
+    p.add_argument("--player-fps", type=float, default=2.0,
+                   help="Frames/sec sampled for player detection.")
+    p.add_argument("--device", default="",
+                   help="Compute device for YOLO: ''(auto)|cpu|cuda|mps.")
+    p.add_argument("--classifier", default="",
+                   help="Path to a trained audio-event model (training/train.py output).")
+    p.add_argument("--classifier-min-prob", type=float, default=0.5,
+                   help="Minimum confidence for a positive event to boost a clip.")
     return p.parse_args(argv)
 
 
@@ -47,11 +59,21 @@ def main(argv=None) -> int:
         encoder=args.encoder,
         workers=args.workers,
         scene_frame_skip=args.scene_frame_skip,
+        use_player_detect=args.players,
+        player_model=args.player_model,
+        player_sample_fps=args.player_fps,
+        device=args.device,
+        classifier_model=args.classifier,
+        classifier_min_prob=args.classifier_min_prob,
         output_dir=args.output_dir,
     )
 
     def progress(frac: float, msg: str) -> None:
         print(f"[{int(frac * 100):3d}%] {msg}", file=sys.stderr)
+
+    cores = detect_cpu_count()
+    chosen = args.workers if args.workers > 0 else cores
+    print(f"Detected {cores} CPU core(s); using {chosen} worker(s).", file=sys.stderr)
 
     stats = Stats()
     clips = build_highlights(args.video, settings, progress, stats)

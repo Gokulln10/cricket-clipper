@@ -1,0 +1,7 @@
+# Optional ML dependencies for player/ball detection (YOLO) and the
+# audio-event classifier (training/). Install with:
+#   pip install -r requirements-ml.txt
+# For CUDA/MPS-accelerated PyTorch builds see https://pytorch.org/get-started/locally/
+ultralytics>=8.1   # YOLO player/ball detection
+torch>=2.1         # classifier training & inference (also used by ultralytics)
+librosa>=0.10      # log-mel audio features for the classifier

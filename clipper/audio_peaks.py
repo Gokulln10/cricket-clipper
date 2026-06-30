@@ -102,15 +102,20 @@ def find_excitement(
     local_baseline_seconds: float = 45.0,
     use_onset: bool = True,
     onset_sensitivity: float = 2.5,
+    use_swell: bool = True,
+    swell_window_seconds: float = 3.0,
+    swell_sensitivity: float = 1.0,
 ) -> List[Tuple[float, float, float]]:
-    """Find exciting audio regions using adaptive level + onset detection.
+    """Find exciting audio regions using adaptive level + onset + swell detection.
 
-    Two complementary detectors are combined to improve recall:
+    Three complementary detectors are combined to improve recall:
 
     * **Level** — energy that stands out from a *local* rolling baseline, so
       events are caught even during generally loud passages.
-    * **Onset** — a sudden rise in loudness (positive derivative), which catches
+    * **Onset** — a *sharp* rise in loudness (positive derivative), which catches
       fast reactions that never reach the absolute peak level.
+    * **Swell** — a *sustained* rise averaged over a few seconds, which catches
+      boundary cheers that build gradually rather than spiking instantly.
 
     Returns a list of (start_time, end_time, score).
     """
@@ -135,6 +140,73 @@ def find_excitement(
         # Onsets are sharp; allow zero-length events (a single spike counts).
         regions += _regions_from_mask(times, z_onset, onset_mask, 0.0)
 
+    if use_swell:
+        # Forward moving average over the swell window: a sustained cheer build
+        # (typical of a boundary) shows up here even when its peak is modest and
+        # its instantaneous rise is too gentle to trip the onset detector.
+        n = len(rms)
+        w = max(1, int(swell_window_seconds / hop_seconds))
+        csum = np.concatenate([[0.0], np.cumsum(rms)])
+        idx = np.arange(n)
+        end = np.minimum(n, idx + w)
+        fwd = (csum[end] - csum[idx]) / np.maximum(1, end - idx)
+        z_swell = (fwd - median) / (1.4826 * mad)
+        swell_mask = z_swell > swell_sensitivity
+        regions += _regions_from_mask(times, z_swell, swell_mask, min_event_seconds)
+
     regions.sort(key=lambda r: r[0])
     return regions
+
+
+def find_excitement_labeled(
+    times: np.ndarray,
+    rms: np.ndarray,
+    sensitivity: float,
+    min_event_seconds: float,
+    hop_seconds: float = 0.1,
+    local_baseline_seconds: float = 45.0,
+    use_onset: bool = True,
+    onset_sensitivity: float = 2.5,
+    use_swell: bool = True,
+    swell_window_seconds: float = 3.0,
+    swell_sensitivity: float = 1.0,
+) -> List[Tuple[float, float, float, str]]:
+    """Like :func:`find_excitement` but tags each region with the detector that
+    produced it ("level", "onset" or "swell"). Useful for tuning/diagnostics.
+    """
+    if times.size == 0:
+        return []
+
+    median, mad = _local_baseline(rms, hop_seconds, local_baseline_seconds)
+    out: List[Tuple[float, float, float, str]] = []
+
+    z_level = (rms - median) / (1.4826 * mad)
+    for t0, t1, sc in _regions_from_mask(times, z_level, z_level > sensitivity, min_event_seconds):
+        out.append((t0, t1, sc, "level"))
+
+    if use_onset:
+        kernel = max(1, int(0.3 / hop_seconds))
+        smooth = np.convolve(rms, np.ones(kernel) / kernel, mode="same")
+        delta = np.diff(smooth, prepend=smooth[:1])
+        delta[delta < 0] = 0.0
+        d_med = np.median(delta)
+        d_mad = np.median(np.abs(delta - d_med)) + 1e-9
+        z_onset = (delta - d_med) / (1.4826 * d_mad)
+        for t0, t1, sc in _regions_from_mask(times, z_onset, z_onset > onset_sensitivity, 0.0):
+            out.append((t0, t1, sc, "onset"))
+
+    if use_swell:
+        n = len(rms)
+        w = max(1, int(swell_window_seconds / hop_seconds))
+        csum = np.concatenate([[0.0], np.cumsum(rms)])
+        idx = np.arange(n)
+        end = np.minimum(n, idx + w)
+        fwd = (csum[end] - csum[idx]) / np.maximum(1, end - idx)
+        z_swell = (fwd - median) / (1.4826 * mad)
+        for t0, t1, sc in _regions_from_mask(times, z_swell, z_swell > swell_sensitivity, min_event_seconds):
+            out.append((t0, t1, sc, "swell"))
+
+    out.sort(key=lambda r: r[0])
+    return out
+
 

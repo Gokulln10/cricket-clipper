@@ -11,7 +11,7 @@ import streamlit as st
 
 from clipper.config import Settings
 from clipper.ffmpeg_utils import ensure_ffmpeg, resolve_encoder
-from clipper.pipeline import build_highlights, export_clips, Stats
+from clipper.pipeline import build_highlights, export_clips, Stats, detect_cpu_count
 
 st.set_page_config(page_title="Cricket Highlight Clipper", page_icon="🏏", layout="wide")
 
@@ -64,9 +64,32 @@ with st.sidebar:
             "Parallel workers (0 = all cores)", 0, cpu_total, 0, 1,
             help=f"Cores used for motion scoring & export. This machine has {cpu_total} cores.",
         )
+        detected = detect_cpu_count()
+        st.caption(
+            f"Auto-detected **{detected}** usable core(s); "
+            f"{'using all of them' if workers == 0 else f'using {workers}'}."
+        )
         scene_frame_skip = st.slider(
             "Scene-detect frame skip", 0, 5, 0, 1,
             help="Skip frames during scene detection — higher is faster but less precise.",
+        )
+
+        use_players = st.checkbox(
+            "Detect players / ball (YOLO)", value=False,
+            help="Counts people on the field and spots the ball per clip. "
+                 "Requires `pip install -r requirements-ml.txt` (PyTorch).",
+        )
+        player_device = st.selectbox(
+            "Player-detection device", ["auto", "cpu", "cuda", "mps"], index=0,
+            help="Compute device for YOLO. 'mps' = Apple Silicon GPU, 'cuda' = NVIDIA.",
+            disabled=not use_players,
+        )
+
+        classifier_model = st.text_input(
+            "Audio-event model (optional)", value="",
+            placeholder="models/event_clf.pt",
+            help="Path to a model trained with `python -m training.train`. "
+                 "Labels and boosts confident events like four/six/wicket.",
         )
 
 
@@ -85,6 +108,9 @@ def make_settings() -> Settings:
         encoder=encoder,
         workers=int(workers),
         scene_frame_skip=int(scene_frame_skip),
+        use_player_detect=use_players,
+        device="" if player_device == "auto" else player_device,
+        classifier_model=classifier_model.strip(),
         output_dir=st.session_state.get("output_dir", "clips"),
     )
 

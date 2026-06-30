@@ -18,10 +18,23 @@ from .scene_detect import detect_scenes, replay_clusters, snap_to_scenes
 ProgressCb = Optional[Callable[[float, str], None]]
 
 
+def detect_cpu_count() -> int:
+    """Number of usable CPU cores, respecting affinity / cgroup limits."""
+    # os.sched_getaffinity is the most accurate where available (Linux);
+    # it reflects cores actually allotted to this process.
+    getaffinity = getattr(os, "sched_getaffinity", None)
+    if getaffinity is not None:
+        try:
+            return max(1, len(getaffinity(0)))
+        except OSError:
+            pass
+    return max(1, os.cpu_count() or 1)
+
+
 def _worker_count(settings: Settings) -> int:
     if settings.workers and settings.workers > 0:
         return settings.workers
-    return max(1, os.cpu_count() or 1)
+    return detect_cpu_count()
 
 
 
@@ -31,6 +44,12 @@ class Clip:
     end: float
     audio_score: float
     motion_score: float = 0.0
+    player_score: float = 0.0
+    player_count: float = 0.0
+    ball_seen: bool = False
+    event_label: str = ""
+    event_prob: float = 0.0
+    event_boost: float = 0.0
     out_path: str = ""
 
     @property
@@ -39,14 +58,23 @@ class Clip:
 
     @property
     def score(self) -> float:
-        # Blend crowd reaction with on-screen motion.
-        return self.audio_score * (1.0 + 0.5 * self.motion_score)
+        # Blend crowd reaction with on-screen motion and player/ball presence,
+        # then lift clips the trained classifier is confident are real events.
+        base = self.audio_score * (1.0 + 0.5 * self.motion_score)
+        base *= (1.0 + 0.3 * self.player_score)
+        return base * (1.0 + self.event_boost)
 
     @property
     def reasons(self) -> List[str]:
         tags = ["crowd-peak"]
         if self.motion_score >= 0.4:
             tags.append("high-motion")
+        if self.player_count >= 4:
+            tags.append("players")
+        if self.ball_seen:
+            tags.append("ball-in-frame")
+        if self.event_label:
+            tags.append(f"{self.event_label}:{self.event_prob:.2f}")
         return tags
 
 
@@ -63,10 +91,13 @@ class Stats:
     final_clips: int = 0
     clip_seconds_total: float = 0.0
     encoder_used: str = ""
+    cpu_cores: int = 0
+    workers_used: int = 0
 
     @property
     def analyse_seconds(self) -> float:
-        keys = ("metadata", "audio_extract", "crowd_analysis", "scene_detect", "motion_score")
+        keys = ("metadata", "audio_extract", "crowd_analysis", "scene_detect",
+                "motion_score", "player_detect", "classify")
         return sum(self.stage_seconds.get(k, 0.0) for k in keys)
 
     @property
@@ -93,6 +124,7 @@ class Stats:
             f"Candidate clips  : {self.candidate_clips}",
             f"Final clips      : {self.final_clips} ({self.clip_seconds_total:.1f} s total)",
             f"Encoder used     : {self.encoder_used or 'n/a'}",
+            f"CPU cores        : {self.cpu_cores} (workers used: {self.workers_used})",
             "Stage timings:",
         ]
         for name, secs in self.stage_seconds.items():
@@ -153,6 +185,68 @@ def _score_motion_parallel(
             c.motion_score = score_segment(video_path, c.start, c.end, s.motion_sample_fps)
 
 
+def _detect_players(
+    video_path: str, clips: List["Clip"], s: Settings, progress: ProgressCb
+) -> None:
+    """Run YOLO player/ball detection per clip (sequential; model is heavy).
+
+    No-op if the optional ultralytics dependency is unavailable.
+    """
+    from .player_detect import analyze_segment, available
+
+    if not available():
+        _report(progress, 0.95, "Player detection skipped (ultralytics not installed).")
+        return
+
+    total = len(clips)
+    device = s.device or None
+    for i, c in enumerate(clips):
+        _report(progress, 0.9 + 0.08 * (i / max(1, total)),
+                f"Detecting players {i + 1}/{total}...")
+        ps = analyze_segment(
+            video_path, c.start, c.end,
+            model_path=s.player_model,
+            sample_fps=s.player_sample_fps,
+            conf=s.player_conf,
+            device=device,
+        )
+        c.player_score = ps.score
+        c.player_count = ps.avg_players
+        c.ball_seen = ps.ball_seen
+
+
+def _classify_events(
+    video_path: str, clips: List["Clip"], s: Settings, progress: ProgressCb
+) -> None:
+    """Label clips with a trained audio-event classifier and boost positives.
+
+    No-op if the model or ML dependencies are unavailable.
+    """
+    from . import classifier as clf
+
+    model = clf.load(s.classifier_model, s.device or None)
+    if model is None:
+        _report(progress, 0.99, "Classifier skipped (model/deps unavailable).")
+        return
+
+    total = len(clips)
+    for i, c in enumerate(clips):
+        _report(progress, 0.98 + 0.02 * (i / max(1, total)),
+                f"Classifying event {i + 1}/{total}...")
+        try:
+            pred = model.predict_segment(video_path, c.start, c.end)
+        except Exception:
+            continue
+        c.event_label = pred.label
+        c.event_prob = pred.prob
+        if clf.is_positive(pred.label) and pred.prob >= s.classifier_min_prob:
+            # Scale boost by confidence above the threshold.
+            confidence = (pred.prob - s.classifier_min_prob) / max(1e-6, 1 - s.classifier_min_prob)
+            c.event_boost = s.classifier_boost * confidence
+        else:
+            c.event_boost = 0.0
+
+
 
 
 def _merge_and_clamp(clips: List[Clip], s: Settings, duration: float) -> List[Clip]:
@@ -198,6 +292,8 @@ def build_highlights(
     s = settings or Settings()
     stats = stats if stats is not None else Stats()
     stats.video_path = video_path
+    stats.cpu_cores = detect_cpu_count()
+    stats.workers_used = _worker_count(s)
     ensure_ffmpeg()
 
     _report(progress, 0.02, "Reading video metadata...")
@@ -218,6 +314,9 @@ def build_highlights(
             local_baseline_seconds=s.local_baseline_seconds,
             use_onset=s.use_onset,
             onset_sensitivity=s.onset_sensitivity,
+            use_swell=s.use_swell,
+            swell_window_seconds=s.swell_window_seconds,
+            swell_sensitivity=s.swell_sensitivity,
         )
     stats.crowd_peaks = len(regions)
 
@@ -255,6 +354,14 @@ def build_highlights(
     if s.use_event_score and clips:
         with _timed(stats, "motion_score"):
             _score_motion_parallel(video_path, clips, s, progress)
+
+    if s.use_player_detect and clips:
+        with _timed(stats, "player_detect"):
+            _detect_players(video_path, clips, s, progress)
+
+    if s.classifier_model and clips:
+        with _timed(stats, "classify"):
+            _classify_events(video_path, clips, s, progress)
 
     clips.sort(key=lambda c: c.score, reverse=True)
     if s.max_clips and s.max_clips > 0:
