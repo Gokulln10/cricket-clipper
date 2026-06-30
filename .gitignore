@@ -1,0 +1,14 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Output
+clips/
+*.mp4
+*.mov
+*.mkv
+
+# OS / editor
+.DS_Store
