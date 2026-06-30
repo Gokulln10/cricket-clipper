@@ -10,8 +10,8 @@ import tempfile
 import streamlit as st
 
 from clipper.config import Settings
-from clipper.ffmpeg_utils import ensure_ffmpeg
-from clipper.pipeline import build_highlights, export_clips
+from clipper.ffmpeg_utils import ensure_ffmpeg, resolve_encoder
+from clipper.pipeline import build_highlights, export_clips, Stats
 
 st.set_page_config(page_title="Cricket Highlight Clipper", page_icon="🏏", layout="wide")
 
@@ -50,6 +50,25 @@ with st.sidebar:
         use_motion = st.checkbox("Score by motion", value=True)
         accurate = st.checkbox("Frame-accurate cuts (slower)", value=True)
 
+        encoder = st.selectbox(
+            "Video encoder",
+            options=["auto", "cpu", "h264_nvenc", "h264_videotoolbox", "h264_qsv", "h264_amf"],
+            index=0,
+            help="'auto' uses a GPU encoder if available, else CPU. Only applies to "
+                 "frame-accurate cuts (stream-copy uses no encoder).",
+        )
+        st.caption(f"Auto-detected encoder: **{resolve_encoder('auto')}**")
+
+        cpu_total = os.cpu_count() or 1
+        workers = st.slider(
+            "Parallel workers (0 = all cores)", 0, cpu_total, 0, 1,
+            help=f"Cores used for motion scoring & export. This machine has {cpu_total} cores.",
+        )
+        scene_frame_skip = st.slider(
+            "Scene-detect frame skip", 0, 5, 0, 1,
+            help="Skip frames during scene detection — higher is faster but less precise.",
+        )
+
 
 def make_settings() -> Settings:
     return Settings(
@@ -63,6 +82,9 @@ def make_settings() -> Settings:
         use_scene_snap=use_scene,
         use_event_score=use_motion,
         accurate_cut=accurate,
+        encoder=encoder,
+        workers=int(workers),
+        scene_frame_skip=int(scene_frame_skip),
         output_dir=st.session_state.get("output_dir", "clips"),
     )
 
@@ -104,8 +126,9 @@ if st.button("🚀 Process video", type="primary", disabled=video_path is None):
     def on_progress(frac: float, msg: str) -> None:
         progress_bar.progress(frac, text=msg)
 
+    stats = Stats()
     try:
-        clips = build_highlights(video_path, settings, on_progress)
+        clips = build_highlights(video_path, settings, on_progress, stats)
     except Exception as exc:  # surface ffmpeg/processing errors to the user
         st.error(f"Processing failed: {exc}")
         st.stop()
@@ -115,13 +138,25 @@ if st.button("🚀 Process video", type="primary", disabled=video_path is None):
         st.stop()
 
     progress_bar.progress(0.0, text="Exporting clips...")
-    clips = export_clips(video_path, clips, settings, on_progress)
+    clips = export_clips(video_path, clips, settings, on_progress, stats)
     progress_bar.empty()
 
     st.session_state["clips"] = clips
+    st.session_state["stats"] = stats
     st.success(f"Exported {len(clips)} clip(s) to '{settings.output_dir}'.")
 
 # --- Results ---
+stats = st.session_state.get("stats")
+if stats:
+    st.subheader("📊 Processing stats")
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Total time", f"{stats.total_seconds:.1f}s")
+    c2.metric("Speed", f"{stats.realtime_factor:.1f}x realtime")
+    c3.metric("Clips", stats.final_clips)
+    c4.metric("Encoder", stats.encoder_used or "n/a")
+    with st.expander("Detailed stage timings"):
+        st.text(stats.summary())
+
 clips = st.session_state.get("clips")
 if clips:
     st.subheader("3. Clips")

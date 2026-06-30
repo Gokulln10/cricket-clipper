@@ -10,22 +10,54 @@ import bisect
 from typing import List
 
 
-def detect_scenes(video_path: str, threshold: float = 27.0) -> List[float]:
+def detect_scenes(
+    video_path: str,
+    threshold: float = 27.0,
+    frame_skip: int = 0,
+    downscale: int = 0,
+) -> List[float]:
     """Return a sorted list of scene-cut timestamps (seconds).
+
+    ``frame_skip`` > 0 processes every (frame_skip+1)-th frame, roughly
+    dividing decode work by that factor at the cost of cut-timing precision.
+    ``downscale`` > 0 forces a fixed downscale factor (0 = auto).
 
     Falls back to an empty list if PySceneDetect is unavailable so the rest of
     the pipeline keeps working.
     """
     try:
+        from scenedetect import open_video, SceneManager, ContentDetector
+    except Exception:
+        return _detect_scenes_legacy(video_path, threshold)
+
+    try:
+        video = open_video(video_path)
+        manager = SceneManager()
+        manager.add_detector(ContentDetector(threshold=threshold))
+        if downscale and downscale > 0:
+            manager.auto_downscale = False
+            manager.downscale = downscale
+        manager.detect_scenes(video, frame_skip=frame_skip, show_progress=False)
+        scene_list = manager.get_scene_list()
+    except Exception:
+        return _detect_scenes_legacy(video_path, threshold)
+
+    cuts: List[float] = []
+    for start, _end in scene_list:
+        cuts.append(start.get_seconds())
+    return sorted(set(cuts))
+
+
+def _detect_scenes_legacy(video_path: str, threshold: float) -> List[float]:
+    """Fallback using the simple convenience API."""
+    try:
         from scenedetect import detect, ContentDetector
     except Exception:
         return []
-
     try:
         scene_list = detect(video_path, ContentDetector(threshold=threshold))
     except Exception:
         return []
-
     cuts: List[float] = []
     for start, _end in scene_list:
         cuts.append(start.get_seconds())

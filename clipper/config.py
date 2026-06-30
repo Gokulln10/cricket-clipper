@@ -25,11 +25,17 @@ class Settings:
     use_scene_snap: bool = True
     scene_threshold: float = 27.0  # ContentDetector threshold
     snap_max_seconds: float = 2.5  # only snap a boundary within this distance
+    scene_frame_skip: int = 0      # >0 skips frames during detection (faster, less precise)
+    scene_downscale: int = 0       # 0 = auto downscale based on resolution
 
     # --- Motion / event scoring (visual excitement proxy) ---
     use_event_score: bool = True
     motion_sample_fps: float = 4.0 # frames/sec sampled when scoring motion
 
+    # --- Parallelism ---
+    workers: int = 0               # 0 = auto (os.cpu_count()); used for motion + export
+
     # --- Export ---
     accurate_cut: bool = True      # re-encode for frame-accurate cuts
+    encoder: str = "auto"          # auto|cpu|h264_nvenc|h264_videotoolbox|h264_qsv|h264_amf
     output_dir: str = "clips"
