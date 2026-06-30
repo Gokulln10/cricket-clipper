@@ -76,3 +76,31 @@ def snap_to_scenes(t: float, scenes: List[float], max_distance: float) -> float:
         candidates.append(scenes[idx - 1])
     best = min(candidates, key=lambda s: abs(s - t))
     return best if abs(best - t) <= max_distance else t
+
+
+def replay_clusters(
+    scenes: List[float], window_seconds: float, min_cuts: int
+) -> List[tuple]:
+    """Find bursts of scene cuts that usually mark a replay sequence.
+
+    After a wicket or boundary the broadcast rapidly cuts between replay angles,
+    producing a dense cluster of scene changes even when the crowd is quiet.
+    Returns a list of (start_time, end_time, cut_count) for each cluster.
+    """
+    if not scenes or min_cuts <= 1:
+        return []
+
+    scenes = sorted(scenes)
+    clusters = []
+    i, n = 0, len(scenes)
+    while i < n:
+        j = i
+        while j < n and scenes[j] - scenes[i] <= window_seconds:
+            j += 1
+        count = j - i
+        if count >= min_cuts:
+            clusters.append((scenes[i], scenes[j - 1], count))
+            i = j  # don't double-count the same burst
+        else:
+            i += 1
+    return clusters

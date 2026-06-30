@@ -13,7 +13,7 @@ from .config import Settings
 from .event_score import score_segment
 from .export import export_clip
 from .ffmpeg_utils import ensure_ffmpeg, probe_duration, resolve_encoder
-from .scene_detect import detect_scenes, snap_to_scenes
+from .scene_detect import detect_scenes, replay_clusters, snap_to_scenes
 
 ProgressCb = Optional[Callable[[float, str], None]]
 
@@ -58,6 +58,7 @@ class Stats:
     stage_seconds: Dict[str, float] = field(default_factory=dict)
     crowd_peaks: int = 0
     scene_cuts: int = 0
+    replay_events: int = 0
     candidate_clips: int = 0
     final_clips: int = 0
     clip_seconds_total: float = 0.0
@@ -88,6 +89,7 @@ class Stats:
             f"Video duration   : {self.video_seconds:7.1f} s",
             f"Crowd peaks      : {self.crowd_peaks}",
             f"Scene cuts       : {self.scene_cuts}",
+            f"Replay events    : {self.replay_events}",
             f"Candidate clips  : {self.candidate_clips}",
             f"Final clips      : {self.final_clips} ({self.clip_seconds_total:.1f} s total)",
             f"Encoder used     : {self.encoder_used or 'n/a'}",
@@ -210,7 +212,13 @@ def build_highlights(
     _report(progress, 0.25, "Analysing crowd noise...")
     with _timed(stats, "crowd_analysis"):
         times, rms = energy_envelope(audio, s.audio_sr, s.win_seconds, s.hop_seconds)
-        regions = find_excitement(times, rms, s.sensitivity, s.min_event_seconds)
+        regions = find_excitement(
+            times, rms, s.sensitivity, s.min_event_seconds,
+            hop_seconds=s.hop_seconds,
+            local_baseline_seconds=s.local_baseline_seconds,
+            use_onset=s.use_onset,
+            onset_sensitivity=s.onset_sensitivity,
+        )
     stats.crowd_peaks = len(regions)
 
     scenes: List[float] = []
@@ -229,6 +237,17 @@ def build_highlights(
         if scenes:
             start = snap_to_scenes(start, scenes, s.snap_max_seconds)
         candidates.append(Clip(start=start, end=end, audio_score=score))
+
+    # Replay bursts (dense scene cuts) catch exciting moments the crowd misses,
+    # e.g. a wicket where the home crowd goes quiet.
+    if s.use_replay_clusters and scenes:
+        clusters = replay_clusters(scenes, s.replay_window_seconds, s.replay_min_cuts)
+        stats.replay_events = len(clusters)
+        for c0, c1, count in clusters:
+            start = c0 - s.pre_seconds
+            end = c1 + s.post_seconds
+            # Give replay events a moderate base score so motion can rank them.
+            candidates.append(Clip(start=start, end=end, audio_score=float(s.sensitivity)))
 
     clips = _merge_and_clamp(candidates, s, duration)
     stats.candidate_clips = len(clips)
